@@ -1,0 +1,11 @@
+[Unit]
+Description=Bridge youtube channels to RSS Feeds
+Requires=network.target
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=yt2rss
+
+[Install]
+WantedBy=multi-user.target
