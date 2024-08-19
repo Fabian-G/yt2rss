@@ -125,7 +125,7 @@ func (y *YoutubeAPIService) Channel(ctx context.Context, id string, o ...Option)
 		return nil, fmt.Errorf("could not find channel with id %s", id)
 	}
 	channel := channelResponse.Items[0]
-	playlistId := channel.ContentDetails.RelatedPlaylists.Uploads
+	playlistId := "UULF" + channel.Id[2:] // Apparently UULF filters shorts
 	videos, err := y.videos(ctx, playlistId, options)
 	if err != nil {
 		return nil, fmt.Errorf("could not load videos from channel %s: %w", id, err)
