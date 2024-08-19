@@ -105,7 +105,7 @@ func (s *Server) Run(addr string) error {
 	}
 	httpServer := &http.Server{
 		Handler:     sm,
-		ReadTimeout: 10 * time.Second,
+		ReadTimeout: 120 * time.Second,
 	}
 	return httpServer.Serve(socket)
 }
