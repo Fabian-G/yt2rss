@@ -13,11 +13,12 @@ Do not use if:
 - You can live with the limitations of the standard rss feed youtube offers (limited to 15 videos, no download link, no profile picture)
 - You don't want to obtain a youtube api key
 
-## Please note
+## Caveats
 
 - Do not expose this service publicly.
 - Subscribing to channels with many videos is naturally slow. It is therefore recommended to limit the number of items using the `-l` flag or the `limit` query parameter after updating once without limit.
 - Extracting a downloadable url for a youtube video relies on `yt-dlp`. This can be slow and fragile at times.
+- Downloading videos with separate audio and video streams is not supported. Therefore for many videos the maximum resolution is very limited.
 
 ## Installation
 
