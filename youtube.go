@@ -116,52 +116,63 @@ func (y *YoutubeAPIService) Channel(ctx context.Context, id string, o ...Option)
 }
 
 func (y *YoutubeAPIService) videos(ctx context.Context, playlistId string, o options) ([]*feeds.Item, error) {
-
+	y.invalidateCacheIfDirty(playlistId, o.limit)
+	client, err := y.client(ctx)
+	if err != nil {
+		return nil, err
+	}
+	call := client.PlaylistItems.List([]string{"contentDetails", "snippet"}).PlaylistId(playlistId)
 	videos := make([]*feeds.Item, 0)
-	for item, err := range y.allPlaylistItems(ctx, playlistId, o.limit) {
+	for item, err := range take(o.limit, y.allPlaylistItems(ctx, call)) {
 		if err != nil {
 			return nil, err
 		}
-		published, err := time.Parse(time.RFC3339, item.Snippet.PublishedAt)
+		video, err := y.mapToFeedItem(item, o)
 		if err != nil {
-			return nil, fmt.Errorf("could not parse published date of video %s: %w", item.Id, err)
+			return nil, err
 		}
-		enclosure, err := y.formatEnclosure(item, o)
-		if err != nil {
-			return nil, fmt.Errorf("could not format enclosure url: %w", err)
+		videos = append(videos, video)
+		if y.isCached(playlistId, video) {
+			break
 		}
-		videos = append(videos, &feeds.Item{
-			Title:       item.Snippet.Title,
-			Link:        &feeds.Link{Href: fmt.Sprintf("https://youtube.com/watch?v=%s", item.Snippet.ResourceId.VideoId)},
-			Id:          item.Snippet.ResourceId.VideoId,
-			Created:     published,
-			Description: item.Snippet.Description,
-			Enclosure:   enclosure,
-		})
 	}
+	y.cache(playlistId, videos...)
+	after := videos[len(videos)-1].Created.Format(time.RFC3339)
+	for item, err := range take(max(0, o.limit-len(videos)), y.iterCache(playlistId, after)) {
+		if err != nil {
+			return nil, err
+		}
+		videos = append(videos, item)
+	}
+	y.updateMaxLimit(playlistId, o.limit)
 	return videos, nil
 }
 
-func (y *YoutubeAPIService) allPlaylistItems(ctx context.Context, playlistId string, limit int) iter.Seq2[*youtube.PlaylistItem, error] {
-	y.invalidateCacheIfDirty(playlistId, limit)
+func (y *YoutubeAPIService) mapToFeedItem(item *youtube.PlaylistItem, o options) (*feeds.Item, error) {
+	published, err := time.Parse(time.RFC3339, item.Snippet.PublishedAt)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse published date of video %s: %w", item.Id, err)
+	}
+	enclosure, err := y.formatEnclosure(item, o)
+	if err != nil {
+		return nil, fmt.Errorf("could not format enclosure url: %w", err)
+	}
+	return &feeds.Item{
+		Title:       item.Snippet.Title,
+		Link:        &feeds.Link{Href: fmt.Sprintf("https://youtube.com/watch?v=%s", item.Snippet.ResourceId.VideoId)},
+		Id:          item.Snippet.ResourceId.VideoId,
+		Created:     published,
+		Description: item.Snippet.Description,
+		Enclosure:   enclosure,
+	}, nil
+}
+
+func (y *YoutubeAPIService) allPlaylistItems(ctx context.Context, call *youtube.PlaylistItemsListCall) iter.Seq2[*youtube.PlaylistItem, error] {
 	return func(yield func(*youtube.PlaylistItem, error) bool) {
-		client, err := y.client(ctx)
-		if err != nil {
-			yield(nil, err)
-			return
-		}
-		call := client.PlaylistItems.List([]string{"contentDetails", "snippet"}).PlaylistId(playlistId)
 		var cancel error = errors.New("cancelled")
-		var continueAt *youtube.PlaylistItem
-		err = call.Pages(ctx, func(pl *youtube.PlaylistItemListResponse) error {
+		err := call.Pages(ctx, func(pl *youtube.PlaylistItemListResponse) error {
 			for _, e := range pl.Items {
-				if y.isCached(e) {
-					continueAt = e
-					return cancel
-				}
-				y.cache(e)
-				limit--
-				if !yield(e, nil) || limit <= 0 {
+				if !yield(e, nil) {
 					return cancel
 				}
 			}
@@ -169,17 +180,7 @@ func (y *YoutubeAPIService) allPlaylistItems(ctx context.Context, playlistId str
 		})
 		if err != nil && !errors.Is(err, cancel) {
 			yield(nil, err)
-			return
 		}
-		if continueAt != nil {
-			for item, err := range y.iterCache(playlistId, continueAt.Snippet.PublishedAt) {
-				limit--
-				if !yield(item, err) || limit <= 0 {
-					break
-				}
-			}
-		}
-		y.updateMaxLimit(playlistId, limit)
 	}
 }
 
@@ -213,6 +214,7 @@ func (y *YoutubeAPIService) client(ctx context.Context) (*youtube.Service, error
 	y.ytClient = client
 	return y.ytClient, nil
 }
+
 func (y *YoutubeAPIService) invalidateCacheIfDirty(playlistId string, limit int) {
 	if y.Cache == nil {
 		return
@@ -265,18 +267,18 @@ func (y *YoutubeAPIService) updateMaxLimit(playlistId string, limit int) {
 	}
 }
 
-func (y *YoutubeAPIService) isCached(item *youtube.PlaylistItem) bool {
+func (y *YoutubeAPIService) isCached(playlistId string, item *feeds.Item) bool {
 	if y.Cache == nil {
 		return false
 	}
 	var result bool
 	err := y.Cache.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(item.Snippet.PlaylistId))
+		b := tx.Bucket([]byte(playlistId))
 		if b == nil {
 			result = false
 			return nil
 		}
-		result = b.Get([]byte(fmt.Sprintf("%s-%s", item.Snippet.PublishedAt, item.ContentDetails.VideoId))) != nil
+		result = b.Get([]byte(fmt.Sprintf("%s-%s", item.Created.Format(time.RFC3339), item.Id))) != nil
 		return nil
 	})
 	if err != nil {
@@ -286,21 +288,24 @@ func (y *YoutubeAPIService) isCached(item *youtube.PlaylistItem) bool {
 	return result
 }
 
-func (y *YoutubeAPIService) cache(item *youtube.PlaylistItem) {
+func (y *YoutubeAPIService) cache(playlistId string, items ...*feeds.Item) {
 	if y.Cache == nil {
 		return
 	}
 	err := y.Cache.Update(func(tx *bbolt.Tx) error {
-		b, err := tx.CreateBucketIfNotExists([]byte(item.Snippet.PlaylistId))
+		b, err := tx.CreateBucketIfNotExists([]byte(playlistId))
 		if err != nil {
 			return err
 		}
-		data, err := json.Marshal(item)
-		if err != nil {
-			return err
-		}
-		if err = b.Put([]byte(fmt.Sprintf("%s-%s", item.Snippet.PublishedAt, item.ContentDetails.VideoId)), data); err != nil {
-			return err
+
+		for _, item := range items {
+			data, err := json.Marshal(item)
+			if err != nil {
+				return err
+			}
+			if err = b.Put([]byte(fmt.Sprintf("%s-%s", item.Created.Format(time.RFC3339), item.Id)), data); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -309,15 +314,16 @@ func (y *YoutubeAPIService) cache(item *youtube.PlaylistItem) {
 	}
 }
 
-func (y *YoutubeAPIService) iterCache(playlistId string, start string) iter.Seq2[*youtube.PlaylistItem, error] {
-	return func(yield func(*youtube.PlaylistItem, error) bool) {
+func (y *YoutubeAPIService) iterCache(playlistId string, after string) iter.Seq2[*feeds.Item, error] {
+	return func(yield func(*feeds.Item, error) bool) {
 		err := y.Cache.View(func(tx *bbolt.Tx) error {
 			b := tx.Bucket([]byte(playlistId)).Cursor()
 			if b == nil {
 				return nil
 			}
-			for k, v := b.Seek([]byte(start)); k != nil; k, v = b.Prev() {
-				var item youtube.PlaylistItem
+			_, _ = b.Seek([]byte(after))
+			for k, v := b.Prev(); k != nil; k, v = b.Prev() {
+				var item feeds.Item
 				if err := json.Unmarshal(v, &item); err != nil {
 					return err
 				}
@@ -329,6 +335,24 @@ func (y *YoutubeAPIService) iterCache(playlistId string, start string) iter.Seq2
 		})
 		if err != nil {
 			yield(nil, err)
+		}
+	}
+}
+
+func take[K any, V any](n int, seq iter.Seq2[K, V]) iter.Seq2[K, V] {
+	var counter int
+	return func(yield func(K, V) bool) {
+		if n <= 0 {
+			return
+		}
+		for k, v := range seq {
+			if !yield(k, v) {
+				break
+			}
+			counter++
+			if counter >= n {
+				break
+			}
 		}
 	}
 }
