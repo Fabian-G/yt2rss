@@ -2,14 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
+	"log"
 	"math"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/gorilla/feeds"
+	"go.etcd.io/bbolt"
 	"google.golang.org/api/option"
 	"google.golang.org/api/youtube/v3"
 )
@@ -17,8 +22,6 @@ import (
 type YtSerice interface {
 	Channel(ctx context.Context, id string, o ...Option) (*feeds.Feed, error)
 }
-
-var limitReached error = errors.New("limit reached")
 
 type options struct {
 	limit         int
@@ -66,6 +69,7 @@ type Option func(o options) options
 
 type YoutubeAPIService struct {
 	ApiKey   string
+	Cache    *bbolt.DB
 	ytClient *youtube.Service
 }
 
@@ -143,40 +147,173 @@ func (y *YoutubeAPIService) Channel(ctx context.Context, id string, o ...Option)
 }
 
 func (y *YoutubeAPIService) videos(ctx context.Context, playlistId string, o options) ([]*feeds.Item, error) {
-	client, err := y.client(ctx)
-	if err != nil {
-		return nil, err
-	}
 
 	videos := make([]*feeds.Item, 0)
-	err = client.PlaylistItems.List([]string{"contentDetails", "snippet"}).
-		PlaylistId(playlistId).Pages(ctx, func(pl *youtube.PlaylistItemListResponse) error {
-		for _, e := range pl.Items {
-			published, err := time.Parse(time.RFC3339, e.Snippet.PublishedAt)
-			if err != nil {
-				return fmt.Errorf("could not parse published date of video %s: %w", e.Id, err)
-			}
-			enclosure, err := y.formatEnclosure(e, o)
-			if err != nil {
-				return fmt.Errorf("could not format enclosure url: %w", err)
-			}
-			videos = append(videos, &feeds.Item{
-				Title:       e.Snippet.Title,
-				Link:        &feeds.Link{Href: fmt.Sprintf("https://youtube.com/watch?v=%s", e.Snippet.ResourceId.VideoId)},
-				Id:          e.Snippet.ResourceId.VideoId,
-				Created:     published,
-				Description: e.Snippet.Description,
-				Enclosure:   enclosure,
-			})
+	for item, err := range y.allPlaylistItems(ctx, playlistId, o.limit) {
+		if err != nil {
+			return nil, err
 		}
-		if len(videos) >= o.limit {
-			videos = videos[:o.limit]
-			return limitReached
+		published, err := time.Parse(time.RFC3339, item.Snippet.PublishedAt)
+		if err != nil {
+			return nil, fmt.Errorf("could not parse published date of video %s: %w", item.Id, err)
+		}
+		enclosure, err := y.formatEnclosure(item, o)
+		if err != nil {
+			return nil, fmt.Errorf("could not format enclosure url: %w", err)
+		}
+		videos = append(videos, &feeds.Item{
+			Title:       item.Snippet.Title,
+			Link:        &feeds.Link{Href: fmt.Sprintf("https://youtube.com/watch?v=%s", item.Snippet.ResourceId.VideoId)},
+			Id:          item.Snippet.ResourceId.VideoId,
+			Created:     published,
+			Description: item.Snippet.Description,
+			Enclosure:   enclosure,
+		})
+	}
+	return videos, nil
+}
+
+func (y *YoutubeAPIService) allPlaylistItems(ctx context.Context, playlistId string, limit int) iter.Seq2[*youtube.PlaylistItem, error] {
+	y.invalidateCacheIfDirty(playlistId, limit)
+	return func(yield func(*youtube.PlaylistItem, error) bool) {
+		client, err := y.client(ctx)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		call := client.PlaylistItems.List([]string{"contentDetails", "snippet"}).PlaylistId(playlistId)
+		var cancel error = errors.New("cancelled")
+		var continueAt *youtube.PlaylistItem
+		err = call.Pages(ctx, func(pl *youtube.PlaylistItemListResponse) error {
+			for _, e := range pl.Items {
+				if y.isCached(e) {
+					continueAt = e
+					return cancel
+				}
+				y.cache(e)
+				limit--
+				if !yield(e, nil) || limit <= 0 {
+					return cancel
+				}
+			}
+			return nil
+		})
+		if !errors.Is(err, cancel) {
+			yield(nil, err)
+			return
+		}
+		if continueAt == nil {
+			return
+		}
+		for item, err := range y.iterCache(playlistId, continueAt.Snippet.PublishedAt) {
+			limit--
+			if !yield(item, err) || limit <= 0 {
+				return
+			}
+		}
+	}
+}
+
+func (y *YoutubeAPIService) invalidateCacheIfDirty(playlistId string, limit int) {
+	if y.Cache == nil {
+		return
+	}
+	err := y.Cache.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(playlistId))
+		if b == nil {
+			return nil
+		}
+		countArr := b.Get([]byte("count"))
+		var count uint32
+		if countArr != nil {
+			count = binary.LittleEndian.Uint32(countArr)
+		}
+		if count < uint32(limit) {
+			if err := tx.DeleteBucket([]byte(playlistId)); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
-	if err != nil && !errors.Is(err, limitReached) {
-		return nil, err
+	if err != nil {
+		log.Printf("could not check if cache is dirty: %s\n", err)
 	}
-	return videos, nil
+}
+
+func (y *YoutubeAPIService) isCached(item *youtube.PlaylistItem) bool {
+	if y.Cache == nil {
+		return false
+	}
+	var result bool
+	err := y.Cache.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(item.Snippet.PlaylistId))
+		if b == nil {
+			result = false
+			return nil
+		}
+		result = b.Get([]byte(fmt.Sprintf("%s-%s", item.Snippet.PublishedAt, item.ContentDetails.VideoId))) != nil
+		return nil
+	})
+	if err != nil {
+		result = false
+		log.Printf("Could not read cache: %s", err)
+	}
+	return result
+}
+
+func (y *YoutubeAPIService) cache(item *youtube.PlaylistItem) {
+	if y.Cache == nil {
+		return
+	}
+	err := y.Cache.Update(func(tx *bbolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte(item.Snippet.PlaylistId))
+		if err != nil {
+			return err
+		}
+		data, err := json.Marshal(item)
+		if err != nil {
+			return err
+		}
+		if err = b.Put([]byte(fmt.Sprintf("%s-%s", item.Snippet.PublishedAt, item.ContentDetails.VideoId)), data); err != nil {
+			return err
+		}
+		countArr := b.Get([]byte("count"))
+		var count uint32
+		if countArr != nil {
+			count = binary.LittleEndian.Uint32(countArr)
+		}
+		incCount := [4]byte{}
+		binary.LittleEndian.PutUint32(incCount[:], count+1)
+		if err = b.Put([]byte("count"), incCount[:]); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("Could not write to cache: %s", err)
+	}
+}
+
+func (y *YoutubeAPIService) iterCache(playlistId string, start string) iter.Seq2[*youtube.PlaylistItem, error] {
+	return func(yield func(*youtube.PlaylistItem, error) bool) {
+		err := y.Cache.View(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(playlistId)).Cursor()
+			if b == nil {
+				return nil
+			}
+			for k, v := b.Seek([]byte(start)); k != nil; k, v = b.Prev() {
+				var item youtube.PlaylistItem
+				if err := json.Unmarshal(v, &item); err != nil {
+					return err
+				}
+				if !yield(&item, nil) {
+					return nil
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			yield(nil, err)
+		}
+	}
 }

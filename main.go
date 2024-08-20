@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"math"
 	"os"
+	"path"
 	"strconv"
+
+	"go.etcd.io/bbolt"
 )
 
 var (
@@ -84,7 +88,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	var svc YtSerice = &YoutubeAPIService{ApiKey: apiKey}
+	var svc YtSerice = &YoutubeAPIService{ApiKey: apiKey, Cache: openCache()}
 
 	switch {
 	case len(flag.Args()) == 0 && mode == "serve":
@@ -115,4 +119,22 @@ func main() {
 		os.Exit(1)
 	}
 
+}
+
+func openCache() *bbolt.DB {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		log.Printf("Can not determine cache directory. Caching will be disabled: %s\n", err.Error())
+		return nil
+	}
+	if err := os.Mkdir(path.Join(cacheDir, "yt2rss"), 0700); err != nil && !errors.Is(err, os.ErrExist) {
+		log.Printf("Could not create cache directory. Caching will be disabled: %s\n", err.Error())
+		return nil
+	}
+	cache, err := bbolt.Open(path.Join(cacheDir, "yt2rss", "cache.db"), 0600, nil)
+	if err != nil {
+		log.Printf("Could not open cache database. Caching will be disabled: %s\n", err.Error())
+		return nil
+	}
+	return cache
 }
