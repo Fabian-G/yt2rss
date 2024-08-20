@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 	"log"
 	"math"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -202,15 +202,15 @@ func (y *YoutubeAPIService) allPlaylistItems(ctx context.Context, playlistId str
 			yield(nil, err)
 			return
 		}
-		if continueAt == nil {
-			return
-		}
-		for item, err := range y.iterCache(playlistId, continueAt.Snippet.PublishedAt) {
-			limit--
-			if !yield(item, err) || limit <= 0 {
-				return
+		if continueAt != nil {
+			for item, err := range y.iterCache(playlistId, continueAt.Snippet.PublishedAt) {
+				limit--
+				if !yield(item, err) || limit <= 0 {
+					break
+				}
 			}
 		}
+		y.updateMaxLimit(playlistId, limit)
 	}
 }
 
@@ -223,20 +223,46 @@ func (y *YoutubeAPIService) invalidateCacheIfDirty(playlistId string, limit int)
 		if b == nil {
 			return nil
 		}
-		countArr := b.Get([]byte("count"))
-		var count uint32
-		if countArr != nil {
-			count = binary.LittleEndian.Uint32(countArr)
-		}
-		if count < uint32(limit) {
+		lastLimit, err := strconv.Atoi(string(b.Get([]byte("last-limit"))))
+		if lastLimit < limit || err != nil {
 			if err := tx.DeleteBucket([]byte(playlistId)); err != nil {
 				return err
 			}
+		}
+		newBucket, err := tx.CreateBucketIfNotExists([]byte(playlistId))
+		if err != nil {
+			return err
+		}
+		if err = newBucket.Put([]byte("last-limit"), []byte(strconv.Itoa(limit))); err != nil {
+			return err
 		}
 		return nil
 	})
 	if err != nil {
 		log.Printf("could not check if cache is dirty: %s\n", err)
+	}
+}
+
+func (y *YoutubeAPIService) updateMaxLimit(playlistId string, limit int) {
+	if y.Cache == nil {
+		return
+	}
+	err := y.Cache.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(playlistId))
+		if b == nil {
+			return nil
+		}
+		lastLimit, err := strconv.Atoi(string(b.Get([]byte("last-limit"))))
+		if err != nil {
+			lastLimit = 0
+		}
+		if err = b.Put([]byte("last-limit"), []byte(strconv.Itoa(max(lastLimit, limit)))); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("could not update last-limit; %s\n", err)
 	}
 }
 
@@ -275,16 +301,6 @@ func (y *YoutubeAPIService) cache(item *youtube.PlaylistItem) {
 			return err
 		}
 		if err = b.Put([]byte(fmt.Sprintf("%s-%s", item.Snippet.PublishedAt, item.ContentDetails.VideoId)), data); err != nil {
-			return err
-		}
-		countArr := b.Get([]byte("count"))
-		var count uint32
-		if countArr != nil {
-			count = binary.LittleEndian.Uint32(countArr)
-		}
-		incCount := [4]byte{}
-		binary.LittleEndian.PutUint32(incCount[:], count+1)
-		if err = b.Put([]byte("count"), incCount[:]); err != nil {
 			return err
 		}
 		return nil
