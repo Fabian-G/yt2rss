@@ -1,4 +1,4 @@
-package yt2rss
+package main
 
 import (
 	"context"

@@ -8,8 +8,6 @@ import (
 	"math"
 	"os"
 	"strconv"
-
-	"github.com/Fabian-G/yt2rss"
 )
 
 var (
@@ -86,11 +84,11 @@ func main() {
 		os.Exit(0)
 	}
 
-	var svc yt2rss.YtSerice = &yt2rss.YoutubeAPIService{ApiKey: apiKey}
+	var svc YtSerice = &YoutubeAPIService{ApiKey: apiKey}
 
 	switch {
 	case len(flag.Args()) == 0 && mode == "serve":
-		server := yt2rss.Server{
+		server := Server{
 			BaseUrl:     baseUrl,
 			Limit:       limit,
 			MimeType:    mimeType,
@@ -103,9 +101,9 @@ func main() {
 		}
 	case len(flag.Args()) == 1 && mode == "single":
 		channel, err := svc.Channel(context.Background(), flag.Arg(0),
-			yt2rss.WithLimit(limit),
-			yt2rss.WithFormat(format),
-			yt2rss.WithMimeType(mimeType))
+			WithLimit(limit),
+			WithFormat(format),
+			WithMimeType(mimeType))
 		if err != nil {
 			log.Fatal(err)
 		}

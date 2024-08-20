@@ -2,8 +2,7 @@ before:
   hooks:
     - go mod tidy
 builds:
-  - main: ./cmd/yt2rss.go 
-    env:
+  - env:
       - CGO_ENABLED=0
     goos:
       - linux
@@ -33,7 +32,3 @@ changelog:
     exclude:
       - '^docs:'
       - '^test:'
-announce:
-  mastodon:
-    enabled: true
-    server: https://ohai.social
