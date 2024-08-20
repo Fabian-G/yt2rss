@@ -37,6 +37,8 @@ var defaultOptions options = options{
 	enclosureBase: "",
 }
 
+type Option func(o options) options
+
 func WithLimit(limit int) func(o options) options {
 	return func(o options) options {
 		o.limit = limit
@@ -65,43 +67,10 @@ func WithEnclosureBase(base string) func(o options) options {
 	}
 }
 
-type Option func(o options) options
-
 type YoutubeAPIService struct {
 	ApiKey   string
 	Cache    *bbolt.DB
 	ytClient *youtube.Service
-}
-
-func (y *YoutubeAPIService) formatEnclosure(v *youtube.PlaylistItem, o options) (*feeds.Enclosure, error) {
-	if len(o.enclosureBase) == 0 {
-		return nil, nil
-	}
-	enc, err := url.Parse(fmt.Sprintf("%s/watch", o.enclosureBase))
-	if err != nil {
-		return nil, fmt.Errorf("could not parse enclosure base url: %w", err)
-	}
-	query := enc.Query()
-	if o.format != defaultOptions.format {
-		query.Add("format", o.format)
-	}
-	query.Add("v", v.Snippet.ResourceId.VideoId)
-
-	enc.RawQuery = query.Encode()
-
-	return &feeds.Enclosure{Url: enc.String(), Length: "-1", Type: o.mimetype}, nil
-}
-
-func (y *YoutubeAPIService) client(ctx context.Context) (*youtube.Service, error) {
-	if y.ytClient != nil {
-		return y.ytClient, nil
-	}
-	client, err := youtube.NewService(ctx, option.WithAPIKey(y.ApiKey))
-	if err != nil {
-		return nil, fmt.Errorf("could not create youtube client: %w", err)
-	}
-	y.ytClient = client
-	return y.ytClient, nil
 }
 
 func (y *YoutubeAPIService) Channel(ctx context.Context, id string, o ...Option) (*feeds.Feed, error) {
@@ -214,6 +183,36 @@ func (y *YoutubeAPIService) allPlaylistItems(ctx context.Context, playlistId str
 	}
 }
 
+func (y *YoutubeAPIService) formatEnclosure(v *youtube.PlaylistItem, o options) (*feeds.Enclosure, error) {
+	if len(o.enclosureBase) == 0 {
+		return nil, nil
+	}
+	enc, err := url.Parse(fmt.Sprintf("%s/watch", o.enclosureBase))
+	if err != nil {
+		return nil, fmt.Errorf("could not parse enclosure base url: %w", err)
+	}
+	query := enc.Query()
+	if o.format != defaultOptions.format {
+		query.Add("format", o.format)
+	}
+	query.Add("v", v.Snippet.ResourceId.VideoId)
+
+	enc.RawQuery = query.Encode()
+
+	return &feeds.Enclosure{Url: enc.String(), Length: "-1", Type: o.mimetype}, nil
+}
+
+func (y *YoutubeAPIService) client(ctx context.Context) (*youtube.Service, error) {
+	if y.ytClient != nil {
+		return y.ytClient, nil
+	}
+	client, err := youtube.NewService(ctx, option.WithAPIKey(y.ApiKey))
+	if err != nil {
+		return nil, fmt.Errorf("could not create youtube client: %w", err)
+	}
+	y.ytClient = client
+	return y.ytClient, nil
+}
 func (y *YoutubeAPIService) invalidateCacheIfDirty(playlistId string, limit int) {
 	if y.Cache == nil {
 		return
