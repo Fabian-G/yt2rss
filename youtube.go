@@ -198,7 +198,7 @@ func (y *YoutubeAPIService) allPlaylistItems(ctx context.Context, playlistId str
 			}
 			return nil
 		})
-		if !errors.Is(err, cancel) {
+		if err != nil && !errors.Is(err, cancel) {
 			yield(nil, err)
 			return
 		}
