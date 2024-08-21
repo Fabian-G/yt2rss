@@ -121,7 +121,7 @@ func main() {
 
 }
 
-func openCache() *bbolt.DB {
+func openCache() *Cache {
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {
 		log.Printf("Can not determine cache directory. Caching will be disabled: %s\n", err.Error())
@@ -136,5 +136,6 @@ func openCache() *bbolt.DB {
 		log.Printf("Could not open cache database. Caching will be disabled: %s\n", err.Error())
 		return nil
 	}
-	return cache
+
+	return &Cache{DB: cache}
 }

@@ -2,19 +2,15 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
-	"log"
 	"math"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gorilla/feeds"
-	"go.etcd.io/bbolt"
 	"google.golang.org/api/option"
 	"google.golang.org/api/youtube/v3"
 )
@@ -69,7 +65,7 @@ func WithEnclosureBase(base string) func(o options) options {
 
 type YoutubeAPIService struct {
 	ApiKey   string
-	Cache    *bbolt.DB
+	Cache    *Cache
 	ytClient *youtube.Service
 }
 
@@ -116,7 +112,7 @@ func (y *YoutubeAPIService) Channel(ctx context.Context, id string, o ...Option)
 }
 
 func (y *YoutubeAPIService) videos(ctx context.Context, playlistId string, o options) ([]*feeds.Item, error) {
-	y.invalidateCacheIfDirty(playlistId, o.limit)
+	y.Cache.InvalidateCacheIfDirty(playlistId, o.limit)
 	client, err := y.client(ctx)
 	if err != nil {
 		return nil, err
@@ -132,19 +128,19 @@ func (y *YoutubeAPIService) videos(ctx context.Context, playlistId string, o opt
 			return nil, err
 		}
 		videos = append(videos, video)
-		if y.isCached(playlistId, video) {
+		if y.Cache.HasItem(playlistId, video) {
 			break
 		}
 	}
-	y.cache(playlistId, videos...)
+	y.Cache.Put(playlistId, videos...)
 	after := videos[len(videos)-1].Created.Format(time.RFC3339)
-	for item, err := range take(max(0, o.limit-len(videos)), y.iterCache(playlistId, after)) {
+	for item, err := range take(max(0, o.limit-len(videos)), y.Cache.Iter(playlistId, after)) {
 		if err != nil {
 			return nil, err
 		}
 		videos = append(videos, item)
 	}
-	y.updateMaxLimit(playlistId, o.limit)
+	y.Cache.UpdateMaxLimit(playlistId, o.limit)
 	return videos, nil
 }
 
@@ -213,130 +209,6 @@ func (y *YoutubeAPIService) client(ctx context.Context) (*youtube.Service, error
 	}
 	y.ytClient = client
 	return y.ytClient, nil
-}
-
-func (y *YoutubeAPIService) invalidateCacheIfDirty(playlistId string, limit int) {
-	if y.Cache == nil {
-		return
-	}
-	err := y.Cache.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(playlistId))
-		if b == nil {
-			return nil
-		}
-		lastLimit, err := strconv.Atoi(string(b.Get([]byte("last-limit"))))
-		if lastLimit < limit || err != nil {
-			if err := tx.DeleteBucket([]byte(playlistId)); err != nil {
-				return err
-			}
-		}
-		newBucket, err := tx.CreateBucketIfNotExists([]byte(playlistId))
-		if err != nil {
-			return err
-		}
-		if err = newBucket.Put([]byte("last-limit"), []byte(strconv.Itoa(limit))); err != nil {
-			return err
-		}
-		return nil
-	})
-	if err != nil {
-		log.Printf("could not check if cache is dirty: %s\n", err)
-	}
-}
-
-func (y *YoutubeAPIService) updateMaxLimit(playlistId string, limit int) {
-	if y.Cache == nil {
-		return
-	}
-	err := y.Cache.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(playlistId))
-		if b == nil {
-			return nil
-		}
-		lastLimit, err := strconv.Atoi(string(b.Get([]byte("last-limit"))))
-		if err != nil {
-			lastLimit = 0
-		}
-		if err = b.Put([]byte("last-limit"), []byte(strconv.Itoa(max(lastLimit, limit)))); err != nil {
-			return err
-		}
-		return nil
-	})
-	if err != nil {
-		log.Printf("could not update last-limit; %s\n", err)
-	}
-}
-
-func (y *YoutubeAPIService) isCached(playlistId string, item *feeds.Item) bool {
-	if y.Cache == nil {
-		return false
-	}
-	var result bool
-	err := y.Cache.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(playlistId))
-		if b == nil {
-			result = false
-			return nil
-		}
-		result = b.Get([]byte(fmt.Sprintf("%s-%s", item.Created.Format(time.RFC3339), item.Id))) != nil
-		return nil
-	})
-	if err != nil {
-		result = false
-		log.Printf("Could not read cache: %s", err)
-	}
-	return result
-}
-
-func (y *YoutubeAPIService) cache(playlistId string, items ...*feeds.Item) {
-	if y.Cache == nil {
-		return
-	}
-	err := y.Cache.Update(func(tx *bbolt.Tx) error {
-		b, err := tx.CreateBucketIfNotExists([]byte(playlistId))
-		if err != nil {
-			return err
-		}
-
-		for _, item := range items {
-			data, err := json.Marshal(item)
-			if err != nil {
-				return err
-			}
-			if err = b.Put([]byte(fmt.Sprintf("%s-%s", item.Created.Format(time.RFC3339), item.Id)), data); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		log.Printf("Could not write to cache: %s", err)
-	}
-}
-
-func (y *YoutubeAPIService) iterCache(playlistId string, after string) iter.Seq2[*feeds.Item, error] {
-	return func(yield func(*feeds.Item, error) bool) {
-		err := y.Cache.View(func(tx *bbolt.Tx) error {
-			b := tx.Bucket([]byte(playlistId)).Cursor()
-			if b == nil {
-				return nil
-			}
-			_, _ = b.Seek([]byte(after))
-			for k, v := b.Prev(); k != nil; k, v = b.Prev() {
-				var item feeds.Item
-				if err := json.Unmarshal(v, &item); err != nil {
-					return err
-				}
-				if !yield(&item, nil) {
-					return nil
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			yield(nil, err)
-		}
-	}
 }
 
 func take[K any, V any](n int, seq iter.Seq2[K, V]) iter.Seq2[K, V] {
