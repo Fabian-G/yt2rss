@@ -118,7 +118,6 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
-
 }
 
 func openCache() *Cache {

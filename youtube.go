@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"iter"
 	"math"
+	"mime"
 	"net/url"
 	"strings"
 	"time"
@@ -165,7 +166,7 @@ func (y *YoutubeAPIService) mapToFeedItem(item *youtube.PlaylistItem, o options)
 
 func (y *YoutubeAPIService) allPlaylistItems(ctx context.Context, call *youtube.PlaylistItemsListCall) iter.Seq2[*youtube.PlaylistItem, error] {
 	return func(yield func(*youtube.PlaylistItem, error) bool) {
-		var cancel error = errors.New("cancelled")
+		cancel := errors.New("cancelled")
 		err := call.Pages(ctx, func(pl *youtube.PlaylistItemListResponse) error {
 			for _, e := range pl.Items {
 				if !yield(e, nil) {
@@ -184,15 +185,26 @@ func (y *YoutubeAPIService) formatEnclosure(v *youtube.PlaylistItem, o options) 
 	if len(o.enclosureBase) == 0 {
 		return nil, nil
 	}
-	enc, err := url.Parse(fmt.Sprintf("%s/watch", o.enclosureBase))
+	vId := v.Snippet.ResourceId.VideoId
+	extension, err := mime.ExtensionsByType(o.mimetype)
+	if err != nil {
+		return nil, err
+	}
+
+	var enc *url.URL
+	query := make(url.Values)
+	if len(extension) == 0 {
+		enc, err = url.Parse(fmt.Sprintf("%s/watch", o.enclosureBase))
+		query.Add("v", vId)
+	} else {
+		enc, err = url.Parse(fmt.Sprintf("%s/watch/%s%s", o.enclosureBase, vId, extension[len(extension)-1]))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("could not parse enclosure base url: %w", err)
 	}
-	query := enc.Query()
 	if o.format != defaultOptions.format {
 		query.Add("format", o.format)
 	}
-	query.Add("v", v.Snippet.ResourceId.VideoId)
 
 	enc.RawQuery = query.Encode()
 
