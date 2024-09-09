@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-systemd/activation"
@@ -66,7 +68,7 @@ func (s *Server) channel(rw http.ResponseWriter, r *http.Request) {
 func (s *Server) watch(rw http.ResponseWriter, r *http.Request) {
 	log.Printf("%s %s\n", r.Method, r.URL)
 	query := r.URL.Query()
-	vId := query.Get("v")
+	vId := cmp.Or(query.Get("v"), strings.Split(r.PathValue("vIdWithExt")+".", ".")[0])
 	if len(vId) == 0 {
 		http.Error(rw, "missing video id", http.StatusBadRequest)
 		return
@@ -88,6 +90,7 @@ func (s *Server) Run(addr string) error {
 	sm := http.NewServeMux()
 	sm.HandleFunc("GET /{channel}", s.channel)
 	sm.HandleFunc("GET /watch", s.watch)
+	sm.HandleFunc("GET /watch/{vIdWithExt}", s.watch)
 	sockets, err := activation.Listeners()
 	if err != nil {
 		log.Printf("Warning: Error occurred while obtaining systemd sockets: %s", err)
@@ -122,5 +125,4 @@ func (s *Server) getUrl(videoId string, format string) (string, error) {
 		return "", err
 	}
 	return url.String(), nil
-
 }
